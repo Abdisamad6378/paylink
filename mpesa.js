@@ -145,7 +145,7 @@ async function initiateSTKPush(phoneNumber, amount, accountReference, transactio
   }
 }
 
-// mpesa.js - add this function
+
 
 /**
  * Query the status of an STK Push payment.

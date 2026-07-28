@@ -1,9 +1,11 @@
-// server.js
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
 const { getAccessToken, initiateSTKPush, querySTKPushStatus } = require('./mpesa');
+const { getMpesaErrorMessage } = require('./error-handler');
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
 
 const app = express();
 app.use(cors());
@@ -137,10 +139,11 @@ app.post('/api/mpesa/callback', (req, res) => {
     // TODO: Update the payment record in your database to "completed"
     // TODO: Notify the user that their payment was successful
   } else {
-    // Payment failed or was cancelled
+    const friendlyMessage = getMpesaErrorMessage(ResultCode);
     console.log('Payment failed or cancelled:');
     console.log(`  ResultCode: ${ResultCode}`);
     console.log(`  ResultDesc: ${ResultDesc}`);
+    console.log(`  Friendly message: ${friendlyMessage}`);
     console.log(`  CheckoutRequestID: ${CheckoutRequestID}`);
 
     // TODO: Update the payment record in your database to "failed"
@@ -155,6 +158,177 @@ function getCallbackValue(metadata, name) {
   const item = metadata.Item.find((entry) => entry.Name === name);
   return item ? item.Value : null;
 }
+
+
+// Query payment status from Daraja
+app.get('/api/mpesa/status/:checkoutRequestId', async (req, res) => {
+  try {
+    const { checkoutRequestId } = req.params;
+
+    // First check our database
+    const payment = await prisma.payment.findUnique({
+      where: { checkoutRequestId },
+    });
+
+    if (!payment) {
+      return res.status(404).json({
+        success: false,
+        error: 'Payment not found',
+      });
+    }
+
+    // If the payment is already completed or failed, return the stored result
+    if (payment.status === 'completed' || payment.status === 'failed' || payment.status === 'cancelled') {
+      return res.json({
+        success: true,
+        data: {
+          status: payment.status,
+          resultCode: payment.resultCode,
+          resultDesc: payment.resultDesc,
+          mpesaReceiptNumber: payment.mpesaReceiptNumber,
+          amount: payment.amount,
+          phoneNumber: payment.phoneNumber,
+        },
+      });
+    }
+
+    // If still pending, query Daraja for the latest status
+    try {
+      const queryResult = await querySTKPushStatus(checkoutRequestId);
+      const resultCode = parseInt(queryResult.ResultCode, 10);
+
+      if (resultCode === 0) {
+        // Payment completed -- update database
+        await prisma.payment.update({
+          where: { checkoutRequestId },
+          data: {
+            status: 'completed',
+            resultCode: resultCode,
+            resultDesc: queryResult.ResultDesc,
+          },
+        });
+
+        return res.json({
+          success: true,
+          data: {
+            status: 'completed',
+            resultCode: resultCode,
+            resultDesc: queryResult.ResultDesc,
+            amount: payment.amount,
+            phoneNumber: payment.phoneNumber,
+          },
+        });
+      } else if (resultCode === 1032) {
+        await prisma.payment.update({
+          where: { checkoutRequestId },
+          data: {
+            status: 'cancelled',
+            resultCode: resultCode,
+            resultDesc: queryResult.ResultDesc,
+          },
+        });
+
+        return res.json({
+          success: true,
+          data: { status: 'cancelled', resultCode, resultDesc: queryResult.ResultDesc },
+        });
+      } else {
+        // Other failure
+        await prisma.payment.update({
+          where: { checkoutRequestId },
+          data: {
+            status: 'failed',
+            resultCode: resultCode,
+            resultDesc: queryResult.ResultDesc,
+          },
+        });
+
+        return res.json({
+          success: true,
+          data: { status: 'failed', resultCode, resultDesc: queryResult.ResultDesc },
+        });
+      }
+    } catch (queryError) {
+      // Query failed -- the payment might still be processing
+      return res.json({
+        success: true,
+        data: {
+          status: 'pending',
+          message: 'Payment is still being processed. Try again in a few seconds.',
+        },
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// server.js - add this endpoint
+
+// Poll payment status by payment ID
+app.get('/api/payments/:id/poll', async (req, res) => {
+  try {
+    const payment = await prisma.payment.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!payment) {
+      return res.status(404).json({ success: false, error: 'Payment not found' });
+    }
+
+    // If already resolved, return immediately
+    if (payment.status !== 'pending') {
+      return res.json({
+        success: true,
+        data: {
+          status: payment.status,
+          mpesaReceiptNumber: payment.mpesaReceiptNumber,
+          resultDesc: payment.resultDesc,
+          amount: payment.amount,
+        },
+      });
+    }
+
+    // Still pending -- try querying Daraja
+    try {
+      const queryResult = await querySTKPushStatus(payment.checkoutRequestId);
+      const resultCode = parseInt(queryResult.ResultCode, 10);
+
+      let status = 'pending';
+      if (resultCode === 0) status = 'completed';
+      else if (resultCode === 1032) status = 'cancelled';
+      else if (resultCode !== 1) status = 'failed'; // 1 might mean still processing
+
+      if (status !== 'pending') {
+        await prisma.payment.update({
+          where: { id: payment.id },
+          data: {
+            status,
+            resultCode,
+            resultDesc: queryResult.ResultDesc,
+          },
+        });
+      }
+
+      return res.json({
+        success: true,
+        data: {
+          status,
+          resultDesc: queryResult.ResultDesc,
+          amount: payment.amount,
+        },
+      });
+    } catch (queryError) {
+      // Query failed, still pending
+      return res.json({
+        success: true,
+        data: { status: 'pending' },
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
