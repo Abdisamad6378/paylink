@@ -3,7 +3,6 @@ const cors = require('cors');
 require('dotenv').config();
 
 const { getAccessToken, initiateSTKPush, querySTKPushStatus } = require('./mpesa');
-const { getMpesaErrorMessage } = require('./error-handler');
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
@@ -104,54 +103,6 @@ app.post('/api/mpesa/stkpush', async (req, res) => {
   }
 });
 
-// M-Pesa callback endpoint
-app.post('/api/mpesa/callback', (req, res) => {
-  // IMPORTANT: Always respond with a 200 status immediately.
-  // If Safaricom does not get a 200, it will retry the callback,
-  // which can cause duplicate processing.
-  console.log('--- M-Pesa Callback Received ---');
-  console.log(JSON.stringify(req.body, null, 2));
-
-  const { stkCallback } = req.body.Body;
-
-  const {
-    MerchantRequestID,
-    CheckoutRequestID,
-    ResultCode,
-    ResultDesc,
-    CallbackMetadata,
-  } = stkCallback;
-
-  if (ResultCode === 0) {
-    // Payment was successful
-    const amount = getCallbackValue(CallbackMetadata, 'Amount');
-    const receipt = getCallbackValue(CallbackMetadata, 'MpesaReceiptNumber');
-    const transactionDate = getCallbackValue(CallbackMetadata, 'TransactionDate');
-    const phoneNumber = getCallbackValue(CallbackMetadata, 'PhoneNumber');
-
-    console.log('Payment successful:');
-    console.log(`  Receipt: ${receipt}`);
-    console.log(`  Amount: KES ${amount}`);
-    console.log(`  Phone: ${phoneNumber}`);
-    console.log(`  Date: ${transactionDate}`);
-    console.log(`  CheckoutRequestID: ${CheckoutRequestID}`);
-
-    // TODO: Update the payment record in your database to "completed"
-    // TODO: Notify the user that their payment was successful
-  } else {
-    const friendlyMessage = getMpesaErrorMessage(ResultCode);
-    console.log('Payment failed or cancelled:');
-    console.log(`  ResultCode: ${ResultCode}`);
-    console.log(`  ResultDesc: ${ResultDesc}`);
-    console.log(`  Friendly message: ${friendlyMessage}`);
-    console.log(`  CheckoutRequestID: ${CheckoutRequestID}`);
-
-    // TODO: Update the payment record in your database to "failed"
-  }
-
-  // Always respond with 200 OK
-  res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
-});
 
 // Helper function
 function getCallbackValue(metadata, name) {
@@ -327,6 +278,68 @@ app.get('/api/payments/:id/poll', async (req, res) => {
     }
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Idempotent callback handler
+app.post('/api/mpesa/callback', async (req, res) => {
+  res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+
+  try {
+    const { stkCallback } = req.body.Body;
+    const { CheckoutRequestID, ResultCode, ResultDesc, CallbackMetadata } = stkCallback;
+
+    // Check if this payment has already been processed
+    const existingPayment = await prisma.payment.findUnique({
+      where: { checkoutRequestId: CheckoutRequestID },
+    });
+
+    if (!existingPayment) {
+      console.warn(`Callback for unknown CheckoutRequestID: ${CheckoutRequestID}`);
+      return;
+    }
+
+    // If already processed (not pending), skip
+    if (existingPayment.status !== 'pending') {
+      console.log(
+        `Duplicate callback for ${CheckoutRequestID}. Already ${existingPayment.status}. Skipping.`
+      );
+      return;
+    }
+
+    // Process the callback
+    if (ResultCode === 0) {
+      const receipt = getCallbackValue(CallbackMetadata, 'MpesaReceiptNumber');
+      const transactionDate = getCallbackValue(CallbackMetadata, 'TransactionDate');
+
+      await prisma.payment.update({
+        where: { checkoutRequestId: CheckoutRequestID },
+        data: {
+          status: 'completed',
+          resultCode: ResultCode,
+          resultDesc: ResultDesc,
+          mpesaReceiptNumber: receipt,
+          transactionDate: String(transactionDate),
+        },
+      });
+
+      console.log(`Payment completed: ${CheckoutRequestID}, Receipt: ${receipt}`);
+    } else {
+      const status = ResultCode === 1032 ? 'cancelled' : 'failed';
+
+      await prisma.payment.update({
+        where: { checkoutRequestId: CheckoutRequestID },
+        data: {
+          status,
+          resultCode: ResultCode,
+          resultDesc: ResultDesc,
+        },
+      });
+
+      console.log(`Payment ${status}: ${CheckoutRequestID}, Reason: ${ResultDesc}`);
+    }
+  } catch (error) {
+    console.error('Callback processing error:', error.message);
   }
 });
 
