@@ -145,4 +145,57 @@ async function initiateSTKPush(phoneNumber, amount, accountReference, transactio
   }
 }
 
-module.exports = { getAccessToken, getBaseUrl, getTimestamp, generatePassword, initiateSTKPush };
+// mpesa.js - add this function
+
+/**
+ * Query the status of an STK Push payment.
+ *
+ * @param {string} checkoutRequestId - The CheckoutRequestID from the STK Push response
+ * @returns {Promise<object>} The query result
+ */
+async function querySTKPushStatus(checkoutRequestId) {
+  const accessToken = await getAccessToken();
+  const timestamp = getTimestamp();
+  const password = generatePassword(timestamp);
+  const baseUrl = getBaseUrl();
+  const shortcode = process.env.MPESA_SHORTCODE;
+
+  const payload = {
+    BusinessShortCode: parseInt(shortcode, 10),
+    Password: password,
+    Timestamp: timestamp,
+    CheckoutRequestID: checkoutRequestId,
+  };
+
+  try {
+    const response = await axios.post(
+      `${baseUrl}/mpesa/stkpushquery/v1/query`,
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    return response.data;
+  } catch (error) {
+    if (error.response) {
+      throw new Error(
+        `STK Query failed: ${error.response.data?.errorMessage || error.response.status}`
+      );
+    }
+    throw new Error('Could not reach Daraja API for STK Query.');
+  }
+}
+
+// Update the module.exports to include querySTKPushStatus
+module.exports = {
+  getAccessToken,
+  getBaseUrl,
+  getTimestamp,
+  generatePassword,
+  initiateSTKPush,
+  querySTKPushStatus,
+};

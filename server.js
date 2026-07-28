@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
-const { getAccessToken, initiateSTKPush } = require('./mpesa');
+const { getAccessToken, initiateSTKPush, querySTKPushStatus } = require('./mpesa');
 
 const app = express();
 app.use(cors());
