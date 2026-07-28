@@ -102,6 +102,60 @@ app.post('/api/mpesa/stkpush', async (req, res) => {
   }
 });
 
+// M-Pesa callback endpoint
+app.post('/api/mpesa/callback', (req, res) => {
+  // IMPORTANT: Always respond with a 200 status immediately.
+  // If Safaricom does not get a 200, it will retry the callback,
+  // which can cause duplicate processing.
+  console.log('--- M-Pesa Callback Received ---');
+  console.log(JSON.stringify(req.body, null, 2));
+
+  const { stkCallback } = req.body.Body;
+
+  const {
+    MerchantRequestID,
+    CheckoutRequestID,
+    ResultCode,
+    ResultDesc,
+    CallbackMetadata,
+  } = stkCallback;
+
+  if (ResultCode === 0) {
+    // Payment was successful
+    const amount = getCallbackValue(CallbackMetadata, 'Amount');
+    const receipt = getCallbackValue(CallbackMetadata, 'MpesaReceiptNumber');
+    const transactionDate = getCallbackValue(CallbackMetadata, 'TransactionDate');
+    const phoneNumber = getCallbackValue(CallbackMetadata, 'PhoneNumber');
+
+    console.log('Payment successful:');
+    console.log(`  Receipt: ${receipt}`);
+    console.log(`  Amount: KES ${amount}`);
+    console.log(`  Phone: ${phoneNumber}`);
+    console.log(`  Date: ${transactionDate}`);
+    console.log(`  CheckoutRequestID: ${CheckoutRequestID}`);
+
+    // TODO: Update the payment record in your database to "completed"
+    // TODO: Notify the user that their payment was successful
+  } else {
+    // Payment failed or was cancelled
+    console.log('Payment failed or cancelled:');
+    console.log(`  ResultCode: ${ResultCode}`);
+    console.log(`  ResultDesc: ${ResultDesc}`);
+    console.log(`  CheckoutRequestID: ${CheckoutRequestID}`);
+
+    // TODO: Update the payment record in your database to "failed"
+  }
+
+  // Always respond with 200 OK
+  res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+});
+
+// Helper function
+function getCallbackValue(metadata, name) {
+  const item = metadata.Item.find((entry) => entry.Name === name);
+  return item ? item.Value : null;
+}
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
